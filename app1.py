@@ -58,7 +58,10 @@ DISPLAY_TO_RAW_FEATURE = {v: k for k, v in FEATURE_DISPLAY_NAMES.items()}
 # ============================================================
 import base64
 
-WATERMARK_PATH =  r"D:\MS DATA\MS IMG1.jpg"
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+WATERMARK_PATH = BASE_DIR / "MS IMG1.jpg"
 
 def set_dashboard_watermark(image_path):
     with open(image_path, "rb") as image_file:
