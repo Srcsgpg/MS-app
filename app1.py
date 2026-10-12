@@ -2,6 +2,7 @@ import os
 import io
 import json
 import datetime
+import uuid
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -58,10 +59,7 @@ DISPLAY_TO_RAW_FEATURE = {v: k for k, v in FEATURE_DISPLAY_NAMES.items()}
 # ============================================================
 import base64
 
-from pathlib import Path
-
-BASE_DIR = Path(__file__).resolve().parent
-WATERMARK_PATH = BASE_DIR / "MS IMG1.jpg"
+WATERMARK_PATH =  r"D:\MS DATA\MS IMG1.jpg"
 
 def set_dashboard_watermark(image_path):
     with open(image_path, "rb") as image_file:
@@ -88,7 +86,7 @@ def set_dashboard_watermark(image_path):
         unsafe_allow_html=True
     )
 
-set_dashboard_watermark(WATERMARK_PATH)
+# Watermark applied after page configuration
 # =====================================================================
 # 1. PAGE CONFIGURATION & MODERN DARK SIDEBAR CSS STYLING
 # =====================================================================
@@ -97,6 +95,8 @@ st.set_page_config(
     layout="wide", 
     initial_sidebar_state="expanded"
 )
+if os.path.isfile(WATERMARK_PATH):
+    set_dashboard_watermark(WATERMARK_PATH)
 
 st.markdown("""
     <style>
@@ -950,6 +950,180 @@ p_f1 = f"{model_metrics['f1']:.2f}"
 baseline_date = formatted_visit_dates[0] if formatted_visit_dates else "12 Mar 2020"
 dyn_thresh_val = min_increase_for_progression(baseline_edss_val)
 
+# Patient report in sidebar, using the actual selected patient's recorded visits.
+with st.sidebar.expander("Patient report", expanded=False):
+    st.markdown(f"**Patient MS-{selected_pid}**")
+    st.caption(f"{age_val} years · {gender_val} · {mstype_val}")
+    st.metric("Latest EDSS", f"{curr_edss_val:.1f}")
+    st.metric("Starting EDSS", f"{baseline_edss_val:.1f}")
+    st.metric("Progression level", f"{baseline_edss_val + dyn_thresh_val:.1f}")
+    st.caption(f"Model-estimated progression risk: {prog_risk:.0%} (not observed progression)")
+    report_rows = patient_records[["timepoints", "EDSS score"]].copy()
+    report_rows["Visit"] = report_rows["timepoints"].astype(str).str.lower().map(VISIT_DATE_MAPPING).fillna(report_rows["timepoints"])
+    # Build the PDF in memory for the currently selected patient.
+    def _make_patient_pdf():
+        """One-page clinician-facing research snapshot; measured progression is distinct from prediction."""
+        from reportlab.platypus import Image as RLImage
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER
+        from reportlab.lib.utils import ImageReader
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=34, rightMargin=34,
+                                topMargin=27, bottomMargin=25,
+                                title=f"MS-{selected_pid} | Clinical Progression Snapshot")
+        navy = colors.HexColor("#142a43")
+        muted = colors.HexColor("#526579")
+        teal = colors.HexColor("#087e82")
+        red = colors.HexColor("#bf3544")
+        pale = colors.HexColor("#edf3f8")
+        styles = {
+            "title": ParagraphStyle("snap_title", fontName="Helvetica-Bold", fontSize=14.5, leading=17, textColor=navy),
+            "sub": ParagraphStyle("snap_sub", fontName="Helvetica", fontSize=8, leading=11, textColor=muted),
+            "head": ParagraphStyle("snap_head", fontName="Helvetica-Bold", fontSize=9.1, leading=12, textColor=navy, spaceBefore=7, spaceAfter=3),
+            "body": ParagraphStyle("snap_body", fontName="Helvetica", fontSize=7.65, leading=10.2, textColor=navy),
+            "small": ParagraphStyle("snap_small", fontName="Helvetica", fontSize=6.7, leading=8.4, textColor=muted),
+            "cell": ParagraphStyle("snap_cell", fontName="Helvetica", fontSize=7.4, leading=9.4, textColor=navy),
+            "strong": ParagraphStyle("snap_strong", fontName="Helvetica-Bold", fontSize=8, leading=10, textColor=navy),
+        }
+        def para(value, style="body"):
+            return Paragraph(html.escape(str(value)), styles[style])
+        def rich(value, style="body"):
+            return Paragraph(value, styles[style])
+        def table(rows, widths, header=False, padd=4):
+            t = Table(rows, colWidths=widths, hAlign="LEFT")
+            commands = [("VALIGN",(0,0),(-1,-1),"TOP"),
+                        ("LEFTPADDING",(0,0),(-1,-1),6), ("RIGHTPADDING",(0,0),(-1,-1),6),
+                        ("TOPPADDING",(0,0),(-1,-1),padd), ("BOTTOMPADDING",(0,0),(-1,-1),padd),
+                        ("ROWBACKGROUNDS",(0,0),(-1,-1),[colors.white,pale]),
+                        ("LINEBELOW",(0,-1),(-1,-1),0.4,colors.HexColor("#d5e0e8"))]
+            if header:
+                commands += [("BACKGROUND",(0,0),(-1,0),navy),
+                             ("TEXTCOLOR",(0,0),(-1,0),colors.white)]
+            t.setStyle(TableStyle(commands))
+            return t
+        def fig_image(fig, width=263, max_height=140):
+            fig.tight_layout(pad=0.8)
+            png = io.BytesIO()
+            fig.savefig(png, format="png", dpi=135, facecolor="white", bbox_inches="tight")
+            plt.close(fig)
+            png.seek(0)
+            iw, ih = ImageReader(png).getSize()
+            return RLImage(png, width=width, height=min(max_height,width*ih/iw))
+
+        ordered = patient_records.copy()
+        ordered["_order"] = pd.to_numeric(ordered["timepoints"].astype(str).str.extract(r"(\d+)")[0],errors="coerce")
+        ordered = ordered.sort_values("_order")
+        observed = calc_progression(ordered)
+        observed_label = "YES - study-defined progression" if observed == 1 else ("NO - not detected" if observed == 0 else "INDETERMINATE")
+        change = curr_edss_val - baseline_edss_val
+        threshold = baseline_edss_val + dyn_thresh_val
+        x = np.arange(len(ordered))
+        edss = pd.to_numeric(ordered["EDSS score"],errors="coerce").to_numpy()
+        visits = ordered["timepoints"].astype(str).str.upper().tolist()
+        report_date = datetime.date.today().strftime("%d %b %Y")
+        story = [rich("MULTIPLE SCLEROSIS | CLINICAL SNAPSHOT", "title"),
+                 rich(f"Patient MS-{html.escape(str(selected_pid))} &nbsp; | &nbsp; Report: {report_date} &nbsp; | &nbsp; Research decision-support summary", "sub"),
+                 Spacer(1,6)]
+        demographics = [
+            [para("Age / sex","small"), para("MS phenotype","small"), para("Follow-up / visits","small")],
+            [para(f"{age_val} years / {gender_val}","strong"),para(mstype_val,"strong"),para(f"{disease_dur_val} / {len(ordered)}","strong")]
+        ]
+        story.append(table(demographics,[125,225,194],padd=3))
+        story.append(rich("01  PROGRESSION STATUS &amp; MODEL ASSESSMENT", "head"))
+        status_rows = [
+            [para("Observed EDSS progression", "small"),para("EDSS change", "small"),para("Model-estimated risk", "small")],
+            [para(observed_label,"strong"),para(f"{baseline_edss_val:.1f} to {curr_edss_val:.1f} ({change:+.1f}); threshold {threshold:.1f}","strong"),para(f"{prog_risk:.0%} | {'Progression' if pred_class_val else 'Stable'} prediction","strong")]
+        ]
+        story.append(table(status_rows,[185,189,170],padd=4))
+        story.append(rich("Observed status uses two consecutive qualifying EDSS follow-up readings relative to baseline; no minimum confirmation interval is imposed. A predicted risk is not proof of observed progression.","small"))
+
+        story.append(rich("02  EDSS TRAJECTORY &amp; MAIN MODEL CONTRIBUTORS", "head"))
+        fig1, ax1 = plt.subplots(figsize=(4.2,2.15))
+        ax1.plot(x,edss,marker="o",color="#146a9c",lw=2,label="Observed EDSS")
+        ax1.axhline(threshold,color="#bf7633",ls="--",lw=1.5,label="Progression threshold")
+        ax1.set_ylim(0,10);ax1.set_xticks(x);ax1.set_xticklabels(visits,fontsize=7)
+        ax1.set_ylabel("EDSS",fontsize=8);ax1.tick_params(axis="y",labelsize=7)
+        ax1.grid(alpha=.17);ax1.legend(loc="best",fontsize=6,frameon=False)
+        edss_chart=fig_image(fig1)
+        shap_values = None
+        try:
+            shap_values=np.asarray(predictor.compute_patient_shap(ordered),dtype=float).reshape(-1)
+            shap_values=np.nan_to_num(shap_values,nan=0.0,posinf=0.0,neginf=0.0)
+            top_indices=np.argsort(np.abs(shap_values))[::-1][:5]
+            top_indices=top_indices[::-1]
+            short_names={"walkdur_all_sum_w":"Walking duration","wbsteps_all_sum_w":"Walking steps",
+                         "ws_30_avg_w":"Average gait speed","ws_30_p90_w":"Peak gait speed",
+                         "cadence_all_avg_w":"Cadence","strlen_30_avg_w":"Stride length",
+                         "cadence_all_var_w":"Cadence variability","numrelapse2":"Relapses","age":"Age"}
+            labels=[short_names.get(predictor.features[i],predictor.features[i]) for i in top_indices]
+            values=shap_values[top_indices]
+            fig2,ax2=plt.subplots(figsize=(4.2,2.15))
+            ax2.barh(range(len(values)),values,color=["#c44954" if v>0 else "#237fa8" for v in values],height=.65)
+            ax2.set_yticks(range(len(values)));ax2.set_yticklabels(labels,fontsize=7)
+            ax2.axvline(0,color="#526579",lw=.8);ax2.tick_params(axis="x",labelsize=7)
+            ax2.set_xlabel("SHAP impact (log-odds)",fontsize=7);ax2.grid(axis="x",alpha=.14)
+            shap_chart=fig_image(fig2)
+            story.append(Table([[edss_chart,shap_chart]],colWidths=[272,272],style=TableStyle([
+                ("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),0),
+                ("RIGHTPADDING",(0,0),(-1,-1),0),("TOPPADDING",(0,0),(-1,-1),1),
+                ("BOTTOMPADDING",(0,0),(-1,-1),1)])))
+            top = np.argsort(np.abs(shap_values))[::-1][:3]
+            summary_parts=[]
+            for idx in top:
+                name=short_names.get(predictor.features[idx],predictor.features[idx])
+                direction="higher" if shap_values[idx]>0 else "lower"
+                summary_parts.append(f"{name} ({shap_values[idx]:+.2f}; {direction} predicted risk)")
+            story.append(rich("<b>Largest model contributions:</b> "+html.escape("; ".join(summary_parts))+". Red = higher model risk; blue = lower model risk.","small"))
+        except Exception:
+            story.append(edss_chart)
+            story.append(rich("Patient-specific SHAP contributions could not be calculated for this report.","small"))
+        story.append(rich("SHAP explains the model prediction, not why disability changed clinically. These associations do not establish causation.","small"))
+
+        story.append(rich("03  MS TREATMENT &amp; CLINICAL CONTEXT", "head"))
+        history = get_dmt_history_structure(ordered) if "1drug" in ordered.columns else []
+        treatments=[]
+        for item in history:
+            drug,start,end,n_visits,*_ = item
+            if str(drug).strip().lower() not in ("unknown","nan","none","no dmt recorded",""):
+                label=f"{drug} ({str(start).upper()}-{str(end).upper()})" if str(start)!=str(end) else f"{drug} ({str(start).upper()})"
+                treatments.append(label)
+        treatment_text="; ".join(treatments) if treatments else "No recorded DMT in available visits"
+        if len(treatment_text)>260:
+            treatment_text=treatment_text[:257]+"..."
+        story.append(table([
+            [para("Current recorded therapy","small"),para("Recorded treatment sequence","small")],
+            [para(current_dmt_val if current_dmt_val.strip().lower() not in ("nan","unknown") else "Not recorded","strong"),para(treatment_text,"cell")],
+            [para("Latest relapse history / peak gait speed","small"),para("Therapy exposure","small")],
+            [para(f"{relapses_val} relapses (2-year history); {peak_gait_speed:.2f} m/s","cell"),para(f"Current treatment duration (estimated): {current_dmt_duration_str}","cell")]
+        ],[240,304],padd=3))
+        story.append(Spacer(1,5))
+        story.append(rich("<b>Clinical reading:</b> Determine whether the recorded EDSS trajectory meets the study rule; review relapses, walking changes and treatment exposure alongside clinical examination. The data do not establish that any treatment caused improvement or worsening.","small"))
+        story.append(Spacer(1,5))
+        story.append(HRFlowable(width="100%",thickness=.5,color=colors.HexColor("#cbd5e1")))
+        story.append(rich("RESEARCH USE ONLY  |  Not a validated diagnostic report. Model metrics are in-sample, not independent clinical validation. Visit dates are dashboard mappings; verify against source records.","small"))
+        doc.build(story)
+        return buf.getvalue()
+    st.markdown("""
+    <style>
+    div.st-key-patient_pdf_download button,
+    div.st-key-patient_pdf_download button p,
+    div.st-key-patient_pdf_download button span {
+        color: #000000 !important;
+        font-weight: 700 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    st.download_button(
+    "⬇️ Download Patient Report",
+    data=_make_patient_pdf(),
+    file_name=f"MS_{selected_pid}_Patient_Report.pdf",
+    mime="application/pdf",
+    key="patient_pdf_download",
+    use_container_width=True
+   )
+    st.caption("Research dashboard summary. Not a validated clinical report.")
+
 # =====================================================================
 # UPPER PATIENT SUMMARY / CLINICAL ACTION SECTION
 # =====================================================================
@@ -1342,119 +1516,6 @@ with tab_overview:
         for f in mobility_features
     }
 
-    # 3. Show selector
-    selected_mobility_label = st.selectbox(
-        "Select Metric to Track:",
-        options=list(mobility_options.keys()),
-        index=0,
-        key="mobility_metric_selector",
-    )
-
-    # 4. IMPORTANT — DEFINE THE VARIABLE
-    selected_mobility_feat = mobility_options[selected_mobility_label]
-
-
-    # ================================================================
-    # NOW selected_mobility_feat EXISTS
-    # ================================================================
-
-    c_val = float(
-        patient_records[selected_mobility_feat].iloc[-1]
-    )
-
-    med_val = float(
-        pd.to_numeric(
-            df[selected_mobility_feat],
-            errors="coerce"
-        ).median()
-    )
-
-
-    # ================================================================
-    # FORMAT UNITS
-    # ================================================================
-
-    if "ws_30" in selected_mobility_feat:
-
-        unit = "m/s"
-        fmt = "{:.2f}"
-        is_higher_better = True
-
-    elif "strlen" in selected_mobility_feat:
-
-        unit = "m"
-        fmt = "{:.2f}"
-        is_higher_better = True
-
-        if c_val > 10:
-            c_val /= 100.0
-
-        if med_val > 10:
-            med_val /= 100.0
-
-    elif "cadence_all_avg" in selected_mobility_feat:
-
-        unit = "steps/min"
-        fmt = "{:.1f}"
-        is_higher_better = True
-
-    elif "walkdur" in selected_mobility_feat:
-
-        unit = "s"
-        fmt = "{:.0f}"
-        is_higher_better = True
-
-    else:
-
-        unit = ""
-        fmt = "{:.2f}"
-        is_higher_better = False
-
-
-    # ================================================================
-    # STATUS
-    # ================================================================
-
-    if med_val != 0:
-        pct_diff = ((c_val - med_val) / med_val) * 100.0
-    else:
-        pct_diff = 0.0
-
-    pct_diff_str = f"{pct_diff:+.1f}%"
-
-    if is_higher_better:
-
-        if pct_diff >= -15:
-            status_lbl = "NORMAL"
-
-        elif pct_diff >= -30:
-            status_lbl = "MODERATE"
-
-        else:
-            status_lbl = "ELEVATED RISK"
-
-    else:
-
-        if pct_diff <= 15:
-            status_lbl = "NORMAL"
-
-        elif pct_diff <= 30:
-            status_lbl = "MODERATE"
-
-        else:
-            status_lbl = "ELEVATED RISK"
-
-
-    if status_lbl == "NORMAL":
-        status_color = "#16a34a"
-
-    elif status_lbl == "MODERATE":
-        status_color = "#d97706"
-
-    else:
-        status_color = "#dc2626"
-
-
     # ================================================================
     # ONLY NOW CREATE THE TWO FIGURE COLUMNS
     # ================================================================
@@ -1477,6 +1538,121 @@ with tab_overview:
     with chart_col1:
 
         st.markdown("#### Longitudinal Metric Trajectory")
+
+        # 3. Show selector
+        selected_mobility_label = st.selectbox(
+            "Select Metric to Track:",
+            options=list(mobility_options.keys()),
+            index=0,
+            key="mobility_metric_selector",
+        )
+
+        # 4. IMPORTANT — DEFINE THE VARIABLE
+        selected_mobility_feat = mobility_options[selected_mobility_label]
+
+
+        # ================================================================
+        # NOW selected_mobility_feat EXISTS
+        # ================================================================
+
+        c_val = float(
+            patient_records[selected_mobility_feat].iloc[-1]
+        )
+
+        med_val = float(
+            pd.to_numeric(
+                df[selected_mobility_feat],
+                errors="coerce"
+            ).median()
+        )
+
+
+        # ================================================================
+        # FORMAT UNITS
+        # ================================================================
+
+        if "ws_30" in selected_mobility_feat:
+
+            unit = "m/s"
+            fmt = "{:.2f}"
+            is_higher_better = True
+
+        elif "strlen" in selected_mobility_feat:
+
+            unit = "m"
+            fmt = "{:.2f}"
+            is_higher_better = True
+
+            if c_val > 10:
+                c_val /= 100.0
+
+            if med_val > 10:
+                med_val /= 100.0
+
+        elif "cadence_all_avg" in selected_mobility_feat:
+
+            unit = "steps/min"
+            fmt = "{:.1f}"
+            is_higher_better = True
+
+        elif "walkdur" in selected_mobility_feat:
+
+            unit = "s"
+            fmt = "{:.0f}"
+            is_higher_better = True
+
+        else:
+
+            unit = ""
+            fmt = "{:.2f}"
+            is_higher_better = False
+
+
+        # ================================================================
+        # STATUS
+        # ================================================================
+
+        if med_val != 0:
+            pct_diff = ((c_val - med_val) / med_val) * 100.0
+        else:
+            pct_diff = 0.0
+
+        pct_diff_str = f"{pct_diff:+.1f}%"
+
+        if is_higher_better:
+
+            if pct_diff >= -15:
+                status_lbl = "NORMAL"
+
+            elif pct_diff >= -30:
+                status_lbl = "MODERATE"
+
+            else:
+                status_lbl = "ELEVATED RISK"
+
+        else:
+
+            if pct_diff <= 15:
+                status_lbl = "NORMAL"
+
+            elif pct_diff <= 30:
+                status_lbl = "MODERATE"
+
+            else:
+                status_lbl = "ELEVATED RISK"
+
+
+        if status_lbl == "NORMAL":
+            status_color = "#16a34a"
+
+        elif status_lbl == "MODERATE":
+            status_color = "#d97706"
+
+        else:
+            status_color = "#dc2626"
+
+
+
 
         mob_y = pd.to_numeric(
             patient_records[selected_mobility_feat],
@@ -1643,7 +1819,7 @@ with tab_overview:
             bargap=0.22,
             bargroupgap=0.08,
         )
-        st.plotly_chart(fig_demo, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig_demo, use_container_width=True, config={"displayModeBar": False}, key="plot_line_1708")
         st.caption(
             f"Displayed cohort: n={demo['Local Participant'].nunique()} unique participants with known age and gender. "
             "Bar labels show gender-specific counts; the red dashed vertical line marks the selected patient's age-and-gender bar."
@@ -1705,33 +1881,46 @@ with tab_overview:
         else:
             pct_effective_label = _subgroup_label(pct_age_group, pct_gender)
 
-        # The patient and original full-study comparison are fixed across subgroup choices.
-        # Only the selected subgroup median reference changes.
-        full_metric = pd.to_numeric(patient_level_cohort[selected_mobility_feat], errors="coerce").dropna()
-        full_median = float(full_metric.median()) if not full_metric.empty else np.nan
-        subgroup_metric = pd.to_numeric(percentile_cohort[selected_mobility_feat], errors="coerce").dropna()
+        # Independent of the trajectory selector: this card always compares
+        # the patient's latest peak gait speed with the selected subgroup.
+        # The patient measurement stays fixed; the median and difference change.
+        comparison_feat = "ws_30_p90_w"
+        comparison_unit = "m/s"
+        comparison_fmt = "{:.2f}"
+        comparison_patient = pd.to_numeric(
+            patient_records[comparison_feat], errors="coerce"
+        ).iloc[-1]
+        subgroup_metric = pd.to_numeric(
+            percentile_cohort[comparison_feat], errors="coerce"
+        ).dropna()
         subgroup_median = float(subgroup_metric.median()) if not subgroup_metric.empty else np.nan
-        if "strlen" in selected_mobility_feat:
-            if np.isfinite(full_median) and full_median > 10:
-                full_median /= 100.0
-            if np.isfinite(subgroup_median) and subgroup_median > 10:
-                subgroup_median /= 100.0
-        fixed_difference = (100 * (c_val - full_median) / full_median
-                            if np.isfinite(full_median) and full_median != 0 else np.nan)
+        subgroup_difference = (
+            100.0 * (float(comparison_patient) - subgroup_median) / subgroup_median
+            if pd.notna(comparison_patient) and np.isfinite(subgroup_median) and subgroup_median != 0
+            else np.nan
+        )
 
         st.markdown("#### Patient and Cohort Comparison")
+        st.caption("Comparison metric: **Peak gait speed (90th percentile, m/s)**. The trajectory metric dropdown does not affect these cards.")
         metric_cols = st.columns(3, gap="small")
-        metric_cols[0].metric("Patient's Latest Value", f"{fmt.format(c_val)} {unit}".strip(),
-                              help="Patient's latest recorded measurement; unaffected by subgroup filters.")
-        metric_cols[1].metric("Study Cohort Median",
-                              f"{fmt.format(subgroup_median)} {unit}".strip() if np.isfinite(subgroup_median) else "N/A",
-                              help="Median of the selected age/gender subgroup; this is the only card that changes with subgroup selection.")
-        metric_cols[2].metric("Difference from Cohort Median",
-                              f"{fixed_difference:+.1f}%" if np.isfinite(fixed_difference) else "N/A",
-                              help="Fixed difference from the full-study, patient-level cohort median; does not change with subgroup selection.")
+        metric_cols[0].metric(
+            "Patient's Latest Value",
+            f"{comparison_fmt.format(comparison_patient)} {comparison_unit}" if pd.notna(comparison_patient) else "N/A",
+            help="Latest recorded patient peak gait speed. Unaffected by subgroup filters or trajectory metric selection.",
+        )
+        metric_cols[1].metric(
+            "Study Cohort Median",
+            f"{comparison_fmt.format(subgroup_median)} {comparison_unit}" if np.isfinite(subgroup_median) else "N/A",
+            help="Median peak gait speed of the selected age/gender subgroup (one latest record per patient).",
+        )
+        metric_cols[2].metric(
+            "Difference from Cohort Median",
+            f"{subgroup_difference:+.1f}%" if np.isfinite(subgroup_difference) else "N/A",
+            help="100 × (patient's latest peak gait speed − selected subgroup median) / selected subgroup median. Recalculated whenever the subgroup changes.",
+        )
         st.caption(
             f"Selected median reference: {pct_effective_label} (n={percentile_cohort['Local Participant'].nunique()}). "
-            "Patient values, percentile profile and the difference card use the full study cohort and stay fixed."
+            "The patient value and full-study percentile profile remain fixed; the subgroup median and difference update together."
         )
 
         # Fixed percentile scale: every patient's position uses the full-study distribution.
@@ -1827,99 +2016,98 @@ with tab_overview:
             st.plotly_chart(
                 fig_radar_pct,
                 use_container_width=True,
-                key=f"mobility_radar_{selected_mobility_feat}"
+                key="mobility_radar_fixed_full_study"
             )
 
     # =====================================================================
-    # LONGITUDINAL EDSS TRAJECTORY & PROGRESSION THRESHOLD
+    # EDSS DISABILITY PROGRESSION — simplified clinical presentation
     # =====================================================================
     tt_edss_logic = (
-        "<span class='info-tooltip'>ⓘ"
-        "<span class='tooltiptext'>"
-        "Progression is defined as a <b>1.0-point increase</b> when baseline EDSS is ≤ 5.5, "
-        "or a <b>0.5-point increase</b> when baseline EDSS is > 5.5."
+        "<span class='info-tooltip'>ⓘ<span class='tooltiptext'>"
+        "The progression level is 1.0 EDSS point above the first visit when "
+        "starting EDSS is 5.5 or below, or 0.5 points above when it is above 5.5. "
+        "Two consecutive follow-up visits must meet the level."
         "</span></span>"
     )
-
-    st.markdown(f"### Longitudinal EDSS Trajectory & Progression Threshold {tt_edss_logic}", unsafe_allow_html=True)
+    st.markdown(f"### EDSS Disability Progression Over Time {tt_edss_logic}", unsafe_allow_html=True)
 
     edss_y = pd.to_numeric(patient_records['EDSS score'], errors='coerce').tolist()
     visit_x = formatted_visit_dates
     prog_thresh = min_increase_for_progression(baseline_edss_val)
     target_prog_level = baseline_edss_val + prog_thresh
-    min_progression_points = 2
 
-    # First threshold attainment and first pair of consecutive qualifying visits.
     crossing_idx = next((i for i in range(1, len(edss_y))
                          if pd.notna(edss_y[i]) and edss_y[i] >= target_prog_level), None)
-    sustained_start_idx = next((i for i in range(1, len(edss_y)-1)
-                                if pd.notna(edss_y[i]) and pd.notna(edss_y[i+1])
+    sustained_start_idx = next((i for i in range(1, len(edss_y) - 1)
+                                if pd.notna(edss_y[i]) and pd.notna(edss_y[i + 1])
                                 and edss_y[i] >= target_prog_level
-                                and edss_y[i+1] >= target_prog_level), None)
-    sustained_prog_indices = set()
-    for i in range(1, len(edss_y)-1):
-        if pd.notna(edss_y[i]) and pd.notna(edss_y[i+1]) and edss_y[i] >= target_prog_level and edss_y[i+1] >= target_prog_level:
-            sustained_prog_indices.update((i, i+1))
+                                and edss_y[i + 1] >= target_prog_level), None)
 
-    marker_colors = ['#dc2626' if i in sustained_prog_indices else '#0369a1' for i in range(len(edss_y))]
-    marker_sizes = [12 if i in sustained_prog_indices else 9 for i in range(len(edss_y))]
     timepoint_risks = []
     for idx in range(len(patient_records)):
         risk, _, _, _ = predictor.predict_patient(patient_records.iloc[[idx]])
         timepoint_risks.append(f"{int(risk * 100)}%")
 
+    # Red markers identify visits at or above the progression level;
+    # this alone does not imply confirmed progression.
+    edss_marker_colors = [
+        '#dc2626' if pd.notna(y) and y >= target_prog_level else '#0284c7'
+        for y in edss_y
+    ]
+
     fig_edss_traj = go.Figure()
     fig_edss_traj.add_trace(go.Scatter(
-        x=visit_x, y=edss_y, mode='lines+markers+text',
-        name='Observed EDSS · visit measurements',
-        text=timepoint_risks, textposition='bottom center',
-        textfont=dict(size=12, color='#0284c7', family='Inter, sans-serif'),
+        x=visit_x, y=edss_y, mode='lines+markers',
+        name='Patient EDSS',
         line=dict(color='#0284c7', width=3),
-        marker=dict(size=marker_sizes, color=marker_colors),
+        marker=dict(size=10, color=edss_marker_colors),
         customdata=[[f"{float(y)-baseline_edss_val:+.1f}" if pd.notna(y) else "N/A", r]
                     for y, r in zip(edss_y, timepoint_risks)],
-        hovertemplate='<b>Visit: %{x}</b><br>Observed EDSS: %{y:.1f}<br>Change from baseline: %{customdata[0]} points<br>Model-estimated progression risk: %{customdata[1]}<extra></extra>',
+        hovertemplate=(
+            '<b>%{x}</b><br>'
+            'EDSS score: %{y:.1f}<br>'
+            'Change from first visit: %{customdata[0]}<br>'
+            'Estimated progression risk: %{customdata[1]}'
+            '<extra></extra>'
+        ),
     ))
-    if sustained_prog_indices:
-        indices = sorted(sustained_prog_indices)
-        fig_edss_traj.add_trace(go.Scatter(
-            x=[visit_x[i] for i in indices], y=[edss_y[i] for i in indices],
-            mode='markers', name='Sustained progression · 2 consecutive qualifying visits',
-            marker=dict(size=14, color='#dc2626', symbol='circle-open', line=dict(width=2.5)),
-            hovertemplate='Qualifying visit: %{x}<br>EDSS: %{y:.1f}<br>At/above progression threshold<extra></extra>',
-        ))
     fig_edss_traj.add_trace(go.Scatter(
-        x=visit_x, y=[baseline_edss_val]*len(visit_x), mode='lines',
-        name=f'Baseline reference · EDSS {baseline_edss_val:.1f}',
+        x=visit_x, y=[baseline_edss_val] * len(visit_x), mode='lines',
+        name=f'Starting EDSS ({baseline_edss_val:.1f})',
         line=dict(color='#64748b', width=1.8, dash='dash'),
-        hovertemplate=f'Baseline EDSS: {baseline_edss_val:.1f}<extra></extra>',
+        hovertemplate=f'Starting EDSS: {baseline_edss_val:.1f}<extra></extra>',
     ))
     fig_edss_traj.add_trace(go.Scatter(
-        x=visit_x, y=[target_prog_level]*len(visit_x), mode='lines',
-        name=f'Progression threshold · EDSS ≥ {target_prog_level:.1f} (+{prog_thresh:.1f})',
-        line=dict(color='#dc2626', width=3, dash='dot'),
-        hovertemplate=f'Threshold: EDSS ≥ {target_prog_level:.1f}<br>Required increase: +{prog_thresh:.1f} from baseline<extra></extra>',
+        x=visit_x, y=[target_prog_level] * len(visit_x), mode='lines',
+        name=f'Progression level ({target_prog_level:.1f})',
+        line=dict(color='#dc2626', width=2.5, dash='dot'),
+        hovertemplate=f'Progression level: {target_prog_level:.1f}<extra></extra>',
     ))
-    if crossing_idx is not None:
+    if visit_x:
         fig_edss_traj.add_annotation(
-            x=visit_x[crossing_idx], y=edss_y[crossing_idx],
-            text='First threshold reached', showarrow=True, arrowhead=2,
-            ax=25, ay=-58, font=dict(size=11, color='#991b1b'),
-            bgcolor='#fff7ed', bordercolor='#fecaca', borderpad=5,
+            x=visit_x[-1], y=target_prog_level,
+            text=f'Progression level: {target_prog_level:.1f}',
+            xanchor='right', yanchor='bottom', yshift=7,
+            showarrow=False, font=dict(size=11, color='#dc2626'),
+            bgcolor='rgba(255,255,255,0.88)',
         )
+    # Label sustained progression only after two consecutive qualifying follow-up visits.
     if sustained_start_idx is not None:
         confirm_idx = sustained_start_idx + 1
         fig_edss_traj.add_annotation(
             x=visit_x[confirm_idx], y=edss_y[confirm_idx],
-            text='Sustained criterion met', showarrow=True, arrowhead=2,
-            ax=-35, ay=-70, font=dict(size=11, color='#991b1b'),
-            bgcolor='#fef2f2', bordercolor='#fca5a5', borderpad=5,
+            text='Sustained progression confirmed',
+            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.5,
+            arrowcolor='#b91c1c', ax=0, ay=-48,
+            font=dict(size=11, color='#991b1b'),
+            bgcolor='rgba(255,255,255,0.95)',
+            bordercolor='#fecaca', borderpad=5,
         )
     fig_edss_traj.update_layout(
-        height=430, margin=dict(l=25, r=20, t=85, b=95),
-        plot_bgcolor='white', paper_bgcolor='white', hovermode='x unified',
-        yaxis=dict(title='EDSS score', range=[0.0, max(9.0, target_prog_level+0.5)], gridcolor='#f1f5f9'),
-        xaxis=dict(title='Clinical visits', gridcolor='#f1f5f9'),
+        height=420, margin=dict(l=25, r=20, t=65, b=55),
+        plot_bgcolor='white', paper_bgcolor='white', hovermode='closest',
+        yaxis=dict(title='EDSS score', range=[0.0, max(9.0, target_prog_level + 0.5)], gridcolor='#f1f5f9'),
+        xaxis=dict(title='Visit date', gridcolor='#f1f5f9'),
         showlegend=True,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0,
                     font=dict(size=10), bgcolor='rgba(255,255,255,0.85)'),
@@ -1928,29 +2116,81 @@ with tab_overview:
     edss_plot_col, edss_info_col = st.columns([3.6, 1.4], gap='medium')
     with edss_plot_col:
         st.plotly_chart(fig_edss_traj, use_container_width=True, key='edss_progression_trajectory')
-        st.caption('Blue line: observed EDSS; small blue percentages: model-estimated risk at each visit. '
-                   'Grey dashed: baseline. Red dotted: required EDSS threshold. '
-                   'Red outlined markers: visits satisfying the sustained-progression rule. '
-                   'Hover over points for visit-level details; click legend entries to show or hide traces.')
+        st.caption(
+            'Red points indicate visits at or above the progression level; sustained progression requires two consecutive qualifying follow-up visits. '
+            'EDSS measures disability in multiple sclerosis. Higher scores indicate greater disability. '
+            'Progression is assessed using changes from the first visit and must be confirmed '
+            'at two consecutive follow-up visits.'
+        )
     with edss_info_col:
-        st.markdown('#### Progression threshold')
-        st.markdown(f"<div style='font-size:2.5rem;font-weight:850;color:#dc2626;line-height:1.1'>EDSS ≥ {target_prog_level:.1f}</div>",
-                    unsafe_allow_html=True)
-        st.caption(f'Baseline EDSS {baseline_edss_val:.1f} + required increase {prog_thresh:.1f} points')
-        st.metric('Latest observed EDSS', f'{curr_edss_val:.1f}',
-                  delta=f'{curr_edss_val-baseline_edss_val:+.1f} points vs baseline', delta_color='off')
-        if crossing_idx is None:
-            st.info('Threshold not reached in the recorded follow-up visits.')
+        st.markdown('#### EDSS Progression Status')
+        metric_left, metric_right = st.columns(2)
+        with metric_left:
+            st.metric('Current EDSS', f'{curr_edss_val:.1f}')
+        with metric_right:
+            st.metric('Progression level', f'{target_prog_level:.1f}')
+
+        if sustained_start_idx is not None:
+            st.error('**Confirmed disability progression**')
+            st.markdown(
+                f'The progression level was met at two consecutive follow-up visits, '
+                f'confirmed on **{visit_x[sustained_start_idx + 1]}**.'
+            )
+        elif crossing_idx is not None:
+            st.warning('**Progression not yet confirmed**')
+            st.markdown(
+                f'The progression level was first reached on **{visit_x[crossing_idx]}**, '
+                'but two consecutive qualifying follow-up visits have not been recorded.'
+            )
         else:
-            st.markdown(f"**First reached:** {visit_x[crossing_idx]} (EDSS {edss_y[crossing_idx]:.1f})")
-            if sustained_start_idx is not None:
-                st.success(f'Sustained progression criterion met by {visit_x[sustained_start_idx+1]}.')
+            st.success('**No confirmed disability progression**')
+            change = curr_edss_val - baseline_edss_val
+            if abs(change) < 0.05:
+                st.markdown("The patient's latest EDSS is unchanged from the first visit.")
+            elif change > 0:
+                st.markdown(f"The patient's latest EDSS is **{change:.1f} points higher** than at the first visit.")
             else:
-                st.warning('Threshold reached, but two consecutive qualifying follow-up visits have not been observed.')
-        if crossing_idx is None and len(edss_y) > 0 and pd.notna(edss_y[-1]):
-            st.caption(f'Additional increase from latest EDSS to threshold: {max(0, target_prog_level-edss_y[-1]):.1f} points.')
-        st.caption('Study rule: at least two consecutive post-baseline visits at or above the threshold. '
-                   'This is an observed threshold assessment, not a forecast of when progression will occur.')
+                st.markdown(f"The patient's latest EDSS is **{abs(change):.1f} points lower** than at the first visit.")
+
+        remaining = max(0.0, target_prog_level - curr_edss_val)
+        if remaining > 0:
+            st.caption(
+                f'An increase of {remaining:.1f} EDSS points from the latest visit is needed '
+                'to reach the progression level. Progression must be confirmed at two '
+                'consecutive follow-up visits.'
+            )
+        else:
+            st.caption('Progression requires two consecutive follow-up visits at or above the progression level.')
+        st.caption(
+            'The progression level is an assessment criterion, not a forecast of when '
+            'progression will occur. Hover risk percentages are model estimates, not '
+            'observed or confirmed progression.'
+        )
+
+    # Interactive explanation of the EDSS threshold (does not change patient data or chart).
+    with st.expander("How is the progression level calculated?", expanded=False):
+        st.markdown("**The required increase depends on the starting EDSS.**")
+        st.markdown("| Starting EDSS | Required increase | Progression level |\n|---|---|---|\n| 5.5 or below | +1.0 | Starting EDSS + 1.0 |\n| Above 5.5 | +0.5 | Starting EDSS + 0.5 |")
+        st.caption("Try a different starting EDSS below. This is an educational example and will not change the selected patient's chart or progression status.")
+        example_baseline = st.slider(
+            "Explore a starting EDSS", min_value=0.0, max_value=9.0,
+            value=float(np.clip(round(baseline_edss_val * 2) / 2, 0, 9)),
+            step=0.5, key="edss_threshold_rule_example"
+        )
+        example_increase = min_increase_for_progression(example_baseline)
+        example_level = example_baseline + example_increase
+        example_cols = st.columns(3)
+        example_cols[0].metric("Starting EDSS", f"{example_baseline:.1f}")
+        example_cols[1].metric("Required increase", f"+{example_increase:.1f}")
+        example_cols[2].metric("Progression level", f"{example_level:.1f}")
+        st.markdown(
+            f"**Calculation:** {example_baseline:.1f} + {example_increase:.1f} = **{example_level:.1f}**"
+        )
+        st.info(
+            "Reaching this level once is not confirmed progression. In this dashboard, "
+            "two consecutive follow-up visits at or above the level are required. "
+            "The current algorithm does not enforce a minimum time between visits."
+        )
 
     # =====================================================================
     # OBSERVED TREATMENT HISTORY TIMELINE
@@ -4020,6 +4260,12 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
         label_visibility="collapsed"
     )
 
+    # Patient selection is not relevant to cohort-level interpretation.
+    if subtab_choice == "Clinical Model Interpretation":
+        st.markdown("""<style>
+        [data-testid="stSidebar"] .st-key-patient_context_sidebar {display:none !important;}
+        </style>""", unsafe_allow_html=True)
+
     curr_patient_dict = {
         'age': float(patient_records['age'].iloc[-1]),
         'numrelapse2': float(patient_records['numrelapse2'].iloc[-1]),
@@ -4042,48 +4288,63 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             else "Selected Patient"
         )
 
-        # 1. Render Figures via User Helper Functions
-        fig_shap = get_exact_shap_waterfall_fig(predictor, patient_records)
-
-        # 2. Extract Exact Numeric Values directly from Matplotlib Plots
-        shap_dict = {}
-       
-        # Extract values directly from SHAP plot axes
-        if len(fig_shap.axes) > 0:
-            ax_s = fig_shap.axes[0]
-            for y_tick, bar in zip(ax_s.get_yticklabels(), ax_s.patches):
-                lbl_text = y_tick.get_text()
-                lbl = lbl_text.split("=")[-1].strip() if "=" in lbl_text else lbl_text.strip()
-                for raw_f, disp_f in FEATURE_DISPLAY_NAMES.items():
-                    if disp_f == lbl or raw_f == lbl or lbl in disp_f:
-                        shap_dict[raw_f] = float(bar.get_width())
-
-        # Extract values directly from LIME plot axes (handles binned text labels)
-       
-        # Direct predictor method fallback if plot extraction misses any feature
-        try:
-            p_shap = predictor.get_patient_shap_dict(patient_records)
-            for k, v in p_shap.items():
-                if k not in shap_dict:
-                    shap_dict[k] = v
-        except Exception:
-            pass
-
-       
-
-        # Build combined list of features ordered by absolute SHAP magnitude
-        ordered_features = sorted(
-            all_features,
-            key=lambda f: abs(shap_dict.get(f, 0.0)),
-            reverse=True
+        # Interactive, patient-specific SHAP: XGBoost TreeExplainer values are in
+        # model-output (log-odds) units for binary logistic models, not % risk.
+        shap_values = np.asarray(predictor.compute_patient_shap(patient_records), dtype=float)
+        shap_table = pd.DataFrame({
+            "Feature": [FEATURE_DISPLAY_NAMES[f] for f in predictor.features],
+            "Observed value": [float(patient_records[f].iloc[-1]) for f in predictor.features],
+            "SHAP value": shap_values,
+        })
+        shap_table["Absolute impact"] = shap_table["SHAP value"].abs()
+        shap_table["Direction"] = np.where(shap_table["SHAP value"] >= 0,
+                                            "Positive impact", "Negative impact")
+        st.info("SHAP explains how each measurement shifts the model's prediction relative to its reference prediction. "
+                "Positive values increase the model score; negative values decrease it. "
+                "SHAP values here are in model-output units (log-odds), **not percentage-point changes in risk**.")
+        display_n = st.slider("Number of factors to show", 3, len(shap_table), len(shap_table),
+                              key="interactive_shap_count")
+        direction_filter = st.radio("Show factors", ["All", "Positive impact", "Negative impact"],
+                                    horizontal=True, key="interactive_shap_direction")
+        visible = shap_table.sort_values("Absolute impact", ascending=False)
+        if direction_filter == "Positive impact":
+            visible = visible[visible["SHAP value"] >= 0]
+        elif direction_filter == "Negative impact":
+            visible = visible[visible["SHAP value"] < 0]
+        visible = visible.head(display_n).sort_values("SHAP value")
+        fig_shap_interactive = px.bar(
+            visible, x="SHAP value", y="Feature", orientation="h", color="Direction",
+            color_discrete_map={"Positive impact": "#dc2626", "Negative impact": "#2563eb"},
+            custom_data=["Observed value", "Direction"],
         )
-
-        # 3. Render Side-by-Side Plots
-        col_shap = st.columns(1)[0]
-        with col_shap:
-            st.markdown("**Factors Influencing the Prediction**")
-            st.caption("SHAP: Quantifies exact directional impact of each feature on patient's risk score")
-            st.pyplot(fig_shap)
+        fig_shap_interactive.update_traces(
+            hovertemplate="<b>%{y}</b><br>Patient measurement: %{customdata[0]:.2f}"
+                          "<br>SHAP (model-output units): %{x:+.3f}<br>%{customdata[1]}<extra></extra>"
+        )
+        fig_shap_interactive.add_vline(x=0, line_color="#64748b", line_width=1)
+        fig_shap_interactive.update_layout(height=max(360, 44*len(visible)+130),
+            xaxis_title="SHAP contribution to model score (log-odds)", yaxis_title="",
+            legend_title="Effect", plot_bgcolor="white", paper_bgcolor="white",
+            margin=dict(l=15,r=20,t=15,b=30))
+        st.plotly_chart(fig_shap_interactive, use_container_width=True, key="plot_line_4215")
+        if not visible.empty:
+            strongest = shap_table.loc[shap_table["Absolute impact"].idxmax()]
+            st.markdown(f"**Largest individual contribution:** {strongest['Feature']} "
+                        f"({strongest['SHAP value']:+.3f} model-output units). "
+                        "This describes the model's behaviour, not a causal clinical effect.")
+        st.markdown("#### Patient feature impact table")
+        st.caption("Red = positive impact on model progression score; blue = negative impact. "
+                   "Impact reflects model behaviour, not clinical causation or percentage-point risk change.")
+        table_display = shap_table.sort_values("Absolute impact", ascending=False).round(3)
+        def _color_impact(row):
+            shade = "background-color: #fee2e2; color: #991b1b" if row["SHAP value"] >= 0 else "background-color: #dbeafe; color: #1e40af"
+            return [shade if col in ("SHAP value", "Direction", "Absolute impact") else "" for col in row.index]
+        table_display = table_display.rename(columns={"SHAP value": "Impact (log-odds)", "Absolute impact": "Impact magnitude", "Direction": "Impact direction"})
+        def _color_impact_display(row):
+            shade = "background-color: #fee2e2; color: #991b1b" if row["Impact (log-odds)"] >= 0 else "background-color: #dbeafe; color: #1e40af"
+            return [shade if col in ("Impact (log-odds)", "Impact direction", "Impact magnitude") else "" for col in row.index]
+        st.table(table_display.style.apply(_color_impact_display, axis=1)
+                 .format({"Observed value": "{:.2f}", "Impact (log-odds)": "{:+.3f}", "Impact magnitude": "{:.3f}"}))
 
 
     elif subtab_choice == "Rule-Based Logic":
@@ -4330,130 +4591,129 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
                 )
             )
         st.markdown("---")
-        st.markdown(f"#### XCCSHAP Decision Tree Hierarchy for Patient MS-{selected_pid}")
+        # Tree hierarchy plot hidden: retain only the final two XCCSHAP importance charts.
 
         # Visualizing XCCSHAP Hierarchy with active path highlighted for selected patient
         def build_plotly_decision_tree(tree_model, feature_names, patient_latest):
-            tree_ = tree_model.tree_
-
-            x_coords, y_coords = {}, {}
-            node_hover, node_colors = {}, {}
-            active_nodes = set()
-            edge_x, edge_y, active_edge_x, active_edge_y = [], [], [], []
-
-            # Determine active path for current patient
-            curr_node = 0
-            while curr_node != _tree.TREE_UNDEFINED and curr_node >= 0:
-                active_nodes.add(curr_node)
-                if tree_.feature[curr_node] != _tree.TREE_UNDEFINED:
-                    raw_feat = feature_names[tree_.feature[curr_node]]
-                    val = patient_latest.get(raw_feat, 0)
-                    if val <= tree_.threshold[curr_node]:
-                        curr_node = tree_.children_left[curr_node]
-                    else:
-                        curr_node = tree_.children_right[curr_node]
-                else:
-                    break
-
-            annotations = []
-            def calc_positions(node=0, depth=0, left=0.0, right=1.0):
-                y_coords[node] = -depth * 6.0
-                x_coords[node] = (left + right) / 2.0
-
-                left_child = tree_.children_left[node]
-                right_child = tree_.children_right[node]
-                is_leaf = (left_child == _tree.TREE_UNDEFINED and right_child == _tree.TREE_UNDEFINED) or (left_child == -1 and right_child == -1)
-                samples = tree_.n_node_samples[node]
-                value = tree_.value[node][0]
-                is_active = node in active_nodes
-
-                if not is_leaf:
-                    feat_idx = tree_.feature[node]
-                    raw_feat = feature_names[feat_idx]
-                    disp_feat = FEATURE_DISPLAY_NAMES.get(raw_feat, raw_feat)
-                    disp_feat = disp_feat.replace("Average Stride Length", "Avg Stride<br>Length")
-                    disp_feat = disp_feat.replace("Total Walking Steps Count", "Total Steps<br>Count")
-                    disp_feat = disp_feat.replace("Peak Gait Speed", "Peak Gait<br>Speed")
-                    disp_feat = disp_feat.replace("Average Cadence", "Avg Cadence")
-                    thresh = round(float(tree_.threshold[node]), 2)
-                    patient_v = round(float(patient_latest.get(raw_feat, 0)), 2)
-
-                    node_colors[node] = "#f59e0b" if is_active else "#0284c7"
-                    node_hover[node] = f"<b>Rule Node:</b> {disp_feat} ≤ {thresh}<br><b>Patient Measurement:</b> {patient_v}"
-
-                    annotations.append(dict(
-                        x=x_coords[node], y=y_coords[node],
-                        text=f"<b>{disp_feat}</b><br>Threshold: ≤ {thresh}<br><span style='color:#0369a1;'>Patient: {patient_v}</span>",
-                        showarrow=False, 
-                        font=dict(size=14, color="#0f172a"),
-                        bgcolor="rgba(255, 255, 255, 0.98)", 
-                        bordercolor="#f59e0b" if is_active else "#94a3b8",
-                        borderwidth=2.0 if is_active else 1.0, 
-                        borderpad=1
+                    tree_ = tree_model.tree_
+        
+                    x_coords, y_coords = {}, {}
+                    node_hover, node_colors = {}, {}
+                    active_nodes = set()
+                    edge_x, edge_y, active_edge_x, active_edge_y = [], [], [], []
+        
+                    # Determine active path for current patient
+                    curr_node = 0
+                    while curr_node != _tree.TREE_UNDEFINED and curr_node >= 0:
+                        active_nodes.add(curr_node)
+                        if tree_.feature[curr_node] != _tree.TREE_UNDEFINED:
+                            raw_feat = feature_names[tree_.feature[curr_node]]
+                            val = patient_latest.get(raw_feat, 0)
+                            if val <= tree_.threshold[curr_node]:
+                                curr_node = tree_.children_left[curr_node]
+                            else:
+                                curr_node = tree_.children_right[curr_node]
+                        else:
+                            break
+        
+                    annotations = []
+                    def calc_positions(node=0, depth=0, left=0.0, right=1.0):
+                        y_coords[node] = -depth * 6.0
+                        x_coords[node] = (left + right) / 2.0
+        
+                        left_child = tree_.children_left[node]
+                        right_child = tree_.children_right[node]
+                        is_leaf = (left_child == _tree.TREE_UNDEFINED and right_child == _tree.TREE_UNDEFINED) or (left_child == -1 and right_child == -1)
+                        samples = tree_.n_node_samples[node]
+                        value = tree_.value[node][0]
+                        is_active = node in active_nodes
+        
+                        if not is_leaf:
+                            feat_idx = tree_.feature[node]
+                            raw_feat = feature_names[feat_idx]
+                            disp_feat = FEATURE_DISPLAY_NAMES.get(raw_feat, raw_feat)
+                            disp_feat = disp_feat.replace("Average Stride Length", "Avg Stride<br>Length")
+                            disp_feat = disp_feat.replace("Total Walking Steps Count", "Total Steps<br>Count")
+                            disp_feat = disp_feat.replace("Peak Gait Speed", "Peak Gait<br>Speed")
+                            disp_feat = disp_feat.replace("Average Cadence", "Avg Cadence")
+                            thresh = round(float(tree_.threshold[node]), 2)
+                            patient_v = round(float(patient_latest.get(raw_feat, 0)), 2)
+        
+                            node_colors[node] = "#f59e0b" if is_active else "#0284c7"
+                            node_hover[node] = f"<b>Rule Node:</b> {disp_feat} ≤ {thresh}<br><b>Patient Measurement:</b> {patient_v}"
+        
+                            annotations.append(dict(
+                                x=x_coords[node], y=y_coords[node],
+                                text=f"<b>{disp_feat}</b><br>Threshold: ≤ {thresh}<br><span style='color:#0369a1;'>Patient: {patient_v}</span>",
+                                showarrow=False, 
+                                font=dict(size=14, color="#0f172a"),
+                                bgcolor="rgba(255, 255, 255, 0.98)", 
+                                bordercolor="#f59e0b" if is_active else "#94a3b8",
+                                borderwidth=2.0 if is_active else 1.0, 
+                                borderpad=1
+                            ))
+        
+                            if left_child != _tree.TREE_UNDEFINED:
+                                calc_positions(left_child, depth + 1, left, x_coords[node])
+                                target_x = active_edge_x if (left_child in active_nodes and node in active_nodes) else edge_x
+                                target_y = active_edge_y if (left_child in active_nodes and node in active_nodes) else edge_y
+                                target_x.extend([x_coords[node], x_coords[left_child], None])
+                                target_y.extend([y_coords[node], y_coords[left_child], None])
+        
+                            if right_child != _tree.TREE_UNDEFINED:
+                                calc_positions(right_child, depth + 1, x_coords[node], right)
+                                target_x = active_edge_x if (right_child in active_nodes and node in active_nodes) else edge_x
+                                target_y = active_edge_y if (right_child in active_nodes and node in active_nodes) else edge_y
+                                target_x.extend([x_coords[node], x_coords[right_child], None])
+                                target_y.extend([y_coords[node], y_coords[right_child], None])
+                        else:
+                            pred_class = int(np.argmax(value))
+                            class_label = "PROGRESSION" if pred_class == 1 else "STABLE"
+                            leaf_base_color = "#dc2626" if pred_class == 1 else "#16a34a"
+                            node_colors[node] = "#f59e0b" if is_active else leaf_base_color
+                            node_hover[node] = f"<b>Predicted Outcome:</b> {class_label}<br><b>Cohort Samples:</b> {samples}"
+        
+                            annotations.append(dict(
+                                x=x_coords[node], y=y_coords[node],
+                                text=f"<b>{class_label}</b><br><i>n = {samples}</i>", 
+                                showarrow=False,
+                                font=dict(size=14, color="#ffffff" if is_active else leaf_base_color),
+                                bgcolor="#0f172a" if is_active else "rgba(255, 255, 255, 0.98)",
+                                bordercolor=leaf_base_color, 
+                                borderwidth=3, 
+                                borderpad=0
+                            ))
+        
+                    calc_positions(0, 0, 0.0, 1.0)
+                    fig_tree = go.Figure()
+                    fig_tree.add_trace(go.Scatter(x=edge_x, y=edge_y, mode='lines', line=dict(color='#cbd5e1', width=1.5), hoverinfo='none', showlegend=False))
+                    fig_tree.add_trace(go.Scatter(x=active_edge_x, y=active_edge_y, mode='lines', line=dict(color='#f59e0b', width=4.0), hoverinfo='none', showlegend=False))
+                    fig_tree.add_trace(go.Scatter(
+                        x=list(x_coords.values()), y=list(y_coords.values()), mode='markers',
+                        marker=dict(size=24, color=list(node_colors.values()), line=dict(color='#0f172a', width=1.5)),
+                        hoverinfo='text', hovertext=list(node_hover.values()), showlegend=False
                     ))
-
-                    if left_child != _tree.TREE_UNDEFINED:
-                        calc_positions(left_child, depth + 1, left, x_coords[node])
-                        target_x = active_edge_x if (left_child in active_nodes and node in active_nodes) else edge_x
-                        target_y = active_edge_y if (left_child in active_nodes and node in active_nodes) else edge_y
-                        target_x.extend([x_coords[node], x_coords[left_child], None])
-                        target_y.extend([y_coords[node], y_coords[left_child], None])
-
-                    if right_child != _tree.TREE_UNDEFINED:
-                        calc_positions(right_child, depth + 1, x_coords[node], right)
-                        target_x = active_edge_x if (right_child in active_nodes and node in active_nodes) else edge_x
-                        target_y = active_edge_y if (right_child in active_nodes and node in active_nodes) else edge_y
-                        target_x.extend([x_coords[node], x_coords[right_child], None])
-                        target_y.extend([y_coords[node], y_coords[right_child], None])
-                else:
-                    pred_class = int(np.argmax(value))
-                    class_label = "PROGRESSION" if pred_class == 1 else "STABLE"
-                    leaf_base_color = "#dc2626" if pred_class == 1 else "#16a34a"
-                    node_colors[node] = "#f59e0b" if is_active else leaf_base_color
-                    node_hover[node] = f"<b>Predicted Outcome:</b> {class_label}<br><b>Cohort Samples:</b> {samples}"
-
-                    annotations.append(dict(
-                        x=x_coords[node], y=y_coords[node],
-                        text=f"<b>{class_label}</b><br><i>n = {samples}</i>", 
-                        showarrow=False,
-                        font=dict(size=14, color="#ffffff" if is_active else leaf_base_color),
-                        bgcolor="#0f172a" if is_active else "rgba(255, 255, 255, 0.98)",
-                        bordercolor=leaf_base_color, 
-                        borderwidth=3, 
-                        borderpad=0
-                    ))
-
-            calc_positions(0, 0, 0.0, 1.0)
-            fig_tree = go.Figure()
-            fig_tree.add_trace(go.Scatter(x=edge_x, y=edge_y, mode='lines', line=dict(color='#cbd5e1', width=1.5), hoverinfo='none', showlegend=False))
-            fig_tree.add_trace(go.Scatter(x=active_edge_x, y=active_edge_y, mode='lines', line=dict(color='#f59e0b', width=4.0), hoverinfo='none', showlegend=False))
-            fig_tree.add_trace(go.Scatter(
-                x=list(x_coords.values()), y=list(y_coords.values()), mode='markers',
-                marker=dict(size=24, color=list(node_colors.values()), line=dict(color='#0f172a', width=1.5)),
-                hoverinfo='text', hovertext=list(node_hover.values()), showlegend=False
-            ))
-
-            max_depth = max([-y for y in y_coords.values()]) if y_coords else 8
-            fig_tree.update_layout(
-                annotations=annotations, 
-                height=550, 
-                margin=dict(l=30, r=30, t=30, b=30),
-                plot_bgcolor='white', 
-                paper_bgcolor='white',
-                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.08, 1.08]),
-                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-(max_depth + 1.5), 1.5])
-            )
-            return fig_tree
-
+        
+                    max_depth = max([-y for y in y_coords.values()]) if y_coords else 8
+                    fig_tree.update_layout(
+                        annotations=annotations, 
+                        height=550, 
+                        margin=dict(l=30, r=30, t=30, b=30),
+                        plot_bgcolor='white', 
+                        paper_bgcolor='white',
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.08, 1.08]),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-(max_depth + 1.5), 1.5])
+                    )
+                    return fig_tree
+        
         fig_surrogate_tree = build_plotly_decision_tree(rulexai_engine.surrogate_tree, rulexai_engine.feature_names, patient_data)
         st.plotly_chart(fig_surrogate_tree, use_container_width=True)
-        
 
         st.markdown("---")
 
         # 3. Dynamic Rule Importance Comparison Bar Plots per Selected Patient
         st.markdown(f"#### **XCCSHAP Rule Importance: Patient MS-{selected_pid} Active Local Rules vs. Global Weights**")
-        
+
         tree_ = rulexai_engine.surrogate_tree.tree_
         importances = rulexai_engine.surrogate_tree.feature_importances_
 
@@ -4467,7 +4727,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
                 pat_val = float(patient_data.get(feat_raw, 0.0))
                 feat_idx = tree_.feature[i]
                 imp_val = float(importances[feat_idx]) if feat_idx < len(importances) else 0.0
-                
+
                 # Group by feature name to prevent repeated entries on y-axis
                 if disp_feat not in feature_rules:
                     feature_rules[disp_feat] = {
@@ -4522,28 +4782,28 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
                 by='Relative contribution to this explanation (%)',
                 ascending=True
             )
-        
+
         rx_col1, rx_col2 = st.columns(2)
 
         with rx_col1:
             st.markdown(f"##### **Factors Used for Patient MS-{selected_pid}**")
             fig_local_rx = px.bar(
-                df_descriptive_rules, 
-                y='Feature', 
-                x='Relative contribution to this explanation (%)', 
-                orientation='h', 
+                df_descriptive_rules,
+                y='Feature',
+                x='Relative contribution to this explanation (%)',
+                orientation='h',
                 color='Status',
                 color_discrete_map={'Condition satisfied': '#dc2626', 'Condition not satisfied': '#94a3b8'},
                 hover_data=['Patient Value'],
                 labels={
-                    'Relative contribution to this explanation (%)': 'Relative contribution to this explanation (%)', 
+                    'Relative contribution to this explanation (%)': 'Relative contribution to this explanation (%)',
                     'Feature': 'Clinical Feature'
                 }
             )
             fig_local_rx.update_layout(
-                height=340, 
-                plot_bgcolor='white', 
-                paper_bgcolor='white', 
+                height=340,
+                plot_bgcolor='white',
+                paper_bgcolor='white',
                 margin=dict(l=10, r=10, t=20, b=10),
                 yaxis=dict(categoryorder='array', categoryarray=df_descriptive_rules['Feature'].tolist())
             )
@@ -4552,23 +4812,23 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
         with rx_col2:
             st.markdown("##### **Distribution of Relative Rule Weights**")
             df_global_rules = df_descriptive_rules.sort_values(by='Global Importance Weight', ascending=True)
-            
+
             fig_global_rx = px.bar(
-                df_global_rules, 
-                y='Feature', 
-                x='Global Importance Weight', 
+                df_global_rules,
+                y='Feature',
+                x='Global Importance Weight',
                 orientation='h',
-                color='Global Importance Weight', 
+                color='Global Importance Weight',
                 color_continuous_scale='Blues',
                 labels={
-                    'Global Importance Weight': 'Relative importance in the surrogate model', 
+                    'Global Importance Weight': 'Relative importance in the surrogate model',
                     'Feature': 'Clinical Feature'
                 }
             )
             fig_global_rx.update_layout(
-                height=340, 
-                plot_bgcolor='white', 
-                paper_bgcolor='white', 
+                height=340,
+                plot_bgcolor='white',
+                paper_bgcolor='white',
                 margin=dict(l=10, r=10, t=20, b=10),
                 yaxis=dict(categoryorder='array', categoryarray=df_global_rules['Feature'].tolist())
             )
@@ -4663,7 +4923,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
                     paper_bgcolor="white",
                     margin=dict(l=10, r=10, t=20, b=10),
                 )
-                st.plotly_chart(fig_glob, use_container_width=True)
+                st.plotly_chart(fig_glob, use_container_width=True, key="plot_line_4809")
 
             if subgroup_n < 10:
                 st.info(
@@ -4699,7 +4959,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
 
         def _sens_slider(raw_feature, label, current_value, cohort_min, cohort_max, key):
             # Population-level sensitivity uses the observed cohort range.
-            slider_min = float(cohort_min)
+            slider_min = float(max(cohort_min, current_value)) if raw_feature == "age" else float(cohort_min)
             slider_max = max(float(cohort_max), slider_min)
             if raw_feature in ("age", "numrelapse2", "wbsteps_all_sum_w", "walkdur_all_sum_w"):
                 min_v, max_v = int(round(slider_min)), int(round(slider_max))
@@ -4766,7 +5026,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
 
         pdp_col1, pdp_col2 = st.columns([2, 1])
         with pdp_col1:
-            plot_min = feat_min
+            plot_min = max(feat_min, reference_val) if selected_pdp_feature == "age" else feat_min
             plot_max = max(feat_max, scenario_val, plot_min + (1 if selected_pdp_feature == "age" else 1e-6))
             x_pdp = np.linspace(plot_min, plot_max, 60)
             y_pdp = []
@@ -4798,7 +5058,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
                 xaxis=dict(title=selected_pdp_display_label, gridcolor="#f1f5f9"),
                 yaxis=dict(title="Predicted progression risk (%)", range=[0, 100], gridcolor="#f1f5f9")
             )
-            st.plotly_chart(fig_pdp, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(fig_pdp, use_container_width=True, config={"displayModeBar": False}, key="plot_line_4944")
 
         with pdp_col2:
             st.markdown("##### Live Scenario")
@@ -4812,7 +5072,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
                 f"**Allowed range:** `{_sens_fmt(selected_pdp_feature, plot_min)}` to `{_sens_fmt(selected_pdp_feature, plot_max)}` {unit}"
             )
             if selected_pdp_feature == "age":
-                st.caption("Age can vary across the observed cohort range in this population-level sensitivity view.")
+                st.caption("Age starts at the current reference age and can only increase in this scenario.")
 
         # =====================================================================
         # INTERACTIVE TWO-FACTOR RISK SENSITIVITY
@@ -4875,8 +5135,8 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             summary3.metric("Reference risk", f"{reference_risk*100:.0f}%")
             summary4.metric("Scenario risk", f"{scenario_hm_risk*100:.0f}%", delta=f"{(scenario_hm_risk-reference_risk)*100:+.0f} pp")
 
-            x_plot_min = x_min
-            y_plot_min = y_min
+            x_plot_min = max(x_min, reference_x) if x_feature_raw == "age" else x_min
+            y_plot_min = max(y_min, reference_y) if y_feature_raw == "age" else y_min
             x_plot_max = max(x_max, scenario_x, x_plot_min + (1 if x_feature_raw == "age" else 1e-6))
             y_plot_max = max(y_max, scenario_y, y_plot_min + (1 if y_feature_raw == "age" else 1e-6))
             x_range = np.linspace(x_plot_min, x_plot_max, 7)
@@ -4924,7 +5184,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
                 height=520, margin=dict(l=30,r=30,t=65,b=45), plot_bgcolor="white", paper_bgcolor="white",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
-            st.plotly_chart(fig_hm, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(fig_hm, use_container_width=True, config={"displayModeBar": False}, key="plot_line_5070")
 
             st.info(
                 f"The red diamond is the live scenario. Moving either control recalculates the XGBoost prediction while "
