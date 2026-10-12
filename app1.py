@@ -5005,7 +5005,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
         with control_col:
             scenario_val = _sens_slider(
                 selected_pdp_feature,
-                f"Move {selected_pdp_display_label}",
+                f" {selected_pdp_display_label}",
                 reference_val, feat_min, feat_max,
                 f"pdp_scenario_cohort_{selected_pdp_feature}"
             )
