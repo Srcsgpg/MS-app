@@ -4337,7 +4337,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
                f"**Largest negative contribution:** {most_negative['Feature']} "
                f"({most_negative['SHAP value']:+.3f} model-output units)."
              )
-             st.caption(
+            st.caption(
             "SHAP values describe how individual clinical features influence "
             "the model's prediction relative to its baseline, "
             "rather than indicating causal clinical effects."
