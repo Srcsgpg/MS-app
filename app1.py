@@ -4195,7 +4195,7 @@ with tab_xai:
     st.markdown(
     """
     <h1 style='font-size: 2rem; font-weight: 700; margin-bottom: 10px;'>
-        Patient-Specific Clinical Explainability (XAI)
+         Clinical Decision Explainability (XAI)
     </h1>
     """, 
     unsafe_allow_html=True
@@ -4254,14 +4254,14 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
     
     subtab_choice = st.radio(
         "Select Explanation View:",
-        ["Feature Attributions & Global Importance", "Rule-Based Logic", "Clinical Model Interpretation"],
+        ["Feature Importance", "Rule-Based Logic", "Global Importance"],
         horizontal=True,
         key="xai_subtab_selector",
         label_visibility="collapsed"
     )
 
     # Patient selection is not relevant to cohort-level interpretation.
-    if subtab_choice == "Clinical Model Interpretation":
+    if subtab_choice == "Global Importance":
         st.markdown("""<style>
         [data-testid="stSidebar"] .st-key-patient_context_sidebar {display:none !important;}
         </style>""", unsafe_allow_html=True)
@@ -4278,8 +4278,8 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
         'cadence_all_var_w': float(patient_records['cadence_all_var_w'].iloc[-1])
     }
 
-    if subtab_choice == "Feature Attributions & Global Importance":
-        st.markdown("#### **Clinical Decision Explainability (XAI)**")
+    if subtab_choice == "Feature Importance":
+        st.markdown("#### **Patient-Specific Explainability (XAI)**")
         st.caption("SHAP is used to identify and quantify the primary clinical features influencing the model’s prediction, providing interpretable insights into patient-specific clinical decision-making.")
 
         patient_id_display = (
@@ -4302,10 +4302,14 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
         st.info("SHAP explains how each measurement shifts the model's prediction relative to its reference prediction. "
                 "Positive values increase the model score; negative values decrease it. "
                 "SHAP values here are in model-output units (log-odds), **not percentage-point changes in risk**.")
-        display_n = st.slider("Number of factors to show", 3, len(shap_table), len(shap_table),
-                              key="interactive_shap_count")
         direction_filter = st.radio("Show factors", ["All", "Positive impact", "Negative impact"],
                                     horizontal=True, key="interactive_shap_direction")
+        if direction_filter == "All":
+            display_n = st.slider("Number of factors to show", 3, len(shap_table), len(shap_table),
+                                  key="interactive_shap_count")
+        else:
+            # Show every matching factor when a single impact direction is selected.
+            display_n = len(shap_table)
         visible = shap_table.sort_values("Absolute impact", ascending=False)
         if direction_filter == "Positive impact":
             visible = visible[visible["SHAP value"] >= 0]
@@ -4327,35 +4331,68 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             legend_title="Effect", plot_bgcolor="white", paper_bgcolor="white",
             margin=dict(l=15,r=20,t=15,b=30))
         st.plotly_chart(fig_shap_interactive, use_container_width=True, key="plot_line_4215")
-        if not visible.empty:
-            most_positive = shap_table.loc[shap_table["SHAP value"].idxmax()]
-            most_negative = shap_table.loc[shap_table["SHAP value"].idxmin()]
-            strongest = shap_table.loc[shap_table["Absolute impact"].idxmax()]
+        # Interpretations, captions and table all follow the active impact filter.
+        if direction_filter == "Positive impact":
+            interpretation = ("Positive impact (red): these features push the model's "
+                              "predicted MS progression score higher relative to its baseline.")
+            table_caption = "Showing only positive SHAP contributions (red), ranked by impact magnitude."
+        elif direction_filter == "Negative impact":
+            interpretation = ("Negative impact (blue): these features push the model's "
+                              "predicted MS progression score lower relative to its baseline.")
+            table_caption = "Showing only negative SHAP contributions (blue), ranked by impact magnitude."
+        else:
+            interpretation = ("Positive impact (red) raises the model's predicted progression "
+                              "score; negative impact (blue) lowers it, relative to baseline.")
+            table_caption = "Showing both positive (red) and negative (blue) SHAP contributions, ranked by impact magnitude."
+
+        st.markdown(f"**Interpretation:** {interpretation}")
+        if visible.empty:
+            st.caption(f"No {direction_filter.lower()} factors are available for this patient.")
+        else:
+            strongest_visible = visible.loc[visible["Absolute impact"].idxmax()]
             st.markdown(
-               f"**Largest positive contribution:** {most_positive['Feature']} "
-               f"({most_positive['SHAP value']:+.3f} model-output units).  \n"
-               f"**Largest negative contribution:** {most_negative['Feature']} "
-               f"({most_negative['SHAP value']:+.3f} model-output units)."
-             )
-            st.caption(
-            "SHAP values describe how individual clinical features influence "
-            "the model's prediction relative to its baseline, "
-            "rather than indicating causal clinical effects."
-             )
+                f"**Strongest displayed factor:** {strongest_visible['Feature']} "
+                f"({strongest_visible['SHAP value']:+.3f} log-odds)."
+            )
+        st.caption(
+            f"{len(visible)} of {len(shap_table)} patient factors displayed. "
+            "SHAP describes model behaviour, not clinical causation or percentage-point risk changes."
+        )
 
         st.markdown("#### Patient feature impact table")
-        st.caption("Red = positive impact on model progression score; blue = negative impact. "
-                   "Impact reflects model behaviour, not clinical causation or percentage-point risk change.")
-        table_display = shap_table.sort_values("Absolute impact", ascending=False).round(3)
-        def _color_impact(row):
-            shade = "background-color: #fee2e2; color: #991b1b" if row["SHAP value"] >= 0 else "background-color: #dbeafe; color: #1e40af"
-            return [shade if col in ("SHAP value", "Direction", "Absolute impact") else "" for col in row.index]
-        table_display = table_display.rename(columns={"SHAP value": "Impact (log-odds)", "Absolute impact": "Impact magnitude", "Direction": "Impact direction"})
+        st.caption(table_caption)
+        # Use precisely the same filtered rows as the chart, preserving the factor limit.
+        table_display = visible.sort_values("Absolute impact", ascending=False).copy()
+        table_display = table_display.rename(columns={
+            "SHAP value": "Impact (log-odds)",
+            "Absolute impact": "Impact magnitude",
+            "Direction": "Impact direction"
+        })
         def _color_impact_display(row):
-            shade = "background-color: #fee2e2; color: #991b1b" if row["Impact (log-odds)"] >= 0 else "background-color: #dbeafe; color: #1e40af"
-            return [shade if col in ("Impact (log-odds)", "Impact direction", "Impact magnitude") else "" for col in row.index]
-        st.table(table_display.style.apply(_color_impact_display, axis=1)
-                 .format({"Observed value": "{:.2f}", "Impact (log-odds)": "{:+.3f}", "Impact magnitude": "{:.3f}"}))
+            shade = ("background-color: #fee2e2; color: #991b1b" if row["Impact (log-odds)"] >= 0
+                     else "background-color: #dbeafe; color: #1e40af")
+            return [shade if col in ("Impact (log-odds)", "Impact direction", "Impact magnitude")
+                    else "" for col in row.index]
+        if table_display.empty:
+            st.info("No factors match the selected impact direction.")
+        else:
+            st.table(table_display.style.hide(axis="index").apply(_color_impact_display, axis=1).format({
+                "Observed value": "{:.2f}",
+                "Impact (log-odds)": "{:+.3f}",
+                "Impact magnitude": "{:.3f}"
+            }))
+        if direction_filter == "All":
+            st.caption(
+                f"Table reflects the 'All' selection and the {display_n}-factor display limit. "
+                "Positive/negative refers to model progression score, not whether a clinical "
+                "measurement is inherently good or bad."
+            )
+        else:
+            st.caption(
+                f"Table shows all {len(visible)} factors with {direction_filter.lower()}. "
+                "Positive/negative refers to model progression score, not whether a clinical "
+                "measurement is inherently good or bad."
+            )
 
 
     elif subtab_choice == "Rule-Based Logic":
@@ -4524,7 +4561,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             </div>
             """,
             unsafe_allow_html=True
-        )    
+        )
 
         # 2. Unified Rule Model Metrics Dashboard
         X_all = df[predictor.features]
@@ -4724,6 +4761,10 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
 
         # 3. Dynamic Rule Importance Comparison Bar Plots per Selected Patient
         st.markdown(f"#### **XCCSHAP Rule Importance: Patient MS-{selected_pid} Active Local Rules vs. Global Weights**")
+        st.caption("The first chart displays normalized surrogate-tree feature weights, with colors showing "
+                   "whether at least one ≤ threshold is met anywhere in the tree. This does not necessarily "
+                   "mean that feature was tested along the patient's active path. The second chart shows "
+                   "global tree importance across all branches, not patient-specific SHAP impact.")
 
         tree_ = rulexai_engine.surrogate_tree.tree_
         importances = rulexai_engine.surrogate_tree.feature_importances_
@@ -4845,6 +4886,10 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             )
             st.plotly_chart(fig_global_rx, use_container_width=True)
 
+        st.caption("**Interpretation:** A larger bar means a feature is more influential in the simplified "
+                   "decision tree. It does not indicate whether that feature increases or decreases "
+                   "progression risk. Use the step-by-step active decision path above for this patient's "
+                   "actual threshold comparisons, and the SHAP section for signed model contributions.")
         st.markdown("---")
         RuleXAIEngine.render_surrogate_validation_section(predictor, df)
 
@@ -4852,7 +4897,20 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
 # AI DECISION EXPLANATION — COHORT & MODEL ANALYSIS SUBTAB
 # =====================================================================
     elif subtab_choice == "Clinical Model Interpretation":
-        st.markdown("# Clinical Subgroup Model Interpretation & Risk Sensitivity")
+        st.markdown(
+    """
+    <div style="
+        font-size: 22px;
+        font-weight: 700;
+        color: #0f172a;
+        margin-bottom: 8px;
+        line-height: 1.4;
+    ">
+        Clinical Subgroup Model Interpretation & Risk Sensitivity
+    </div>
+    """,
+        unsafe_allow_html=True
+       )
         st.caption(
             "Population-level and model-level analyses. These views do not depend on the selected patient; "
             "sensitivity plots use the cohort-median latest-patient profile as the reference."
@@ -5001,6 +5059,50 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
                 })
                 st.session_state.sensitivity_last_values[state_key] = signature
 
+        def _render_section_sensitivity_tracker(section, tracker_key):
+            # Each sensitivity visualization retains its own independent history.
+            records = [r for r in st.session_state.sensitivity_change_history
+                       if r.get("Reference") == "Cohort median" and r.get("Section") == section]
+            label = "One-feature scenarios" if section == "One-Feature" else "Two-factor scenarios"
+            accent = "#2563eb" if section == "One-Feature" else "#7c3aed"
+            pale = "#eff6ff" if section == "One-Feature" else "#f5f3ff"
+            st.markdown(
+                f"""<div style="background:linear-gradient(110deg,{pale},#ffffff);"
+                style="border:1px solid #dbe4ef;border-left:5px solid {accent};"
+                style="border-radius:13px;padding:17px 20px;margin-top:18px;margin-bottom:12px;">
+                <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:{accent};font-weight:800;">Scenario history</div>
+                <div style="font-size:19px;color:#0f172a;font-weight:800;margin-top:3px;">{label} · {len(records)} recorded change{'s' if len(records)!=1 else ''}</div>
+                <div style="font-size:13px;color:#64748b;margin-top:5px;">Only adjustments made in this analysis are shown. Other trackers remain independent.</div>
+                </div>""", unsafe_allow_html=True
+            )
+            if records:
+                history = pd.DataFrame(records).iloc[::-1].copy()
+                history.insert(0, "#", range(len(history), 0, -1))
+                # Section is already identified by the header; hide redundant metadata.
+                history = history.drop(columns=["Reference", "Section"], errors="ignore")
+                st.dataframe(history, use_container_width=True, hide_index=True,
+                             column_config={"#": st.column_config.NumberColumn("Change", width="small"),
+                                            "Time": st.column_config.TextColumn("Recorded at", width="small"),
+                                            "Predicted risk": st.column_config.TextColumn("Model risk", width="small")})
+            else:
+                st.markdown(
+                    '<div style="border:1px dashed #cbd5e1;border-radius:10px;padding:18px;'
+                    'background:#f8fafc;color:#64748b;text-align:center;">'
+                    'No scenarios recorded yet. Adjust the controls above to start tracking changes.</div>',
+                    unsafe_allow_html=True
+                )
+            left, right = st.columns([4, 1])
+            with left:
+                st.caption("Tracker entries describe model what-if scenarios, not observed clinical outcomes.")
+            with right:
+                if st.button("🗑 Clear history", key=tracker_key, use_container_width=True,
+                             disabled=not bool(records)):
+                    st.session_state.sensitivity_change_history = [
+                        r for r in st.session_state.sensitivity_change_history
+                        if not (r.get("Reference") == "Cohort median" and r.get("Section") == section)
+                    ]
+                    st.rerun()
+
         selected_pdp_display_label = st.selectbox(
             "Select Feature for Analysis:", options=interpretable_feature_names, index=0,
             key="interactive_pdp_feature_select"
@@ -5072,7 +5174,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             st.plotly_chart(fig_pdp, use_container_width=True, config={"displayModeBar": False}, key="plot_line_4944")
 
         with pdp_col2:
-            st.markdown("##### Live Scenario")
+            st.markdown("##### Scenario Exploration")
             m1, m2 = st.columns(2)
             m1.metric("Reference risk", f"{base_risk*100:.0f}%")
             m2.metric("Scenario risk", f"{scenario_risk*100:.0f}%", delta=f"{risk_delta_pp:+.0f} pp")
@@ -5084,6 +5186,8 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             )
             if selected_pdp_feature == "age":
                 st.caption("Age starts at the current reference age and can only increase in this scenario.")
+
+        _render_section_sensitivity_tracker("One-Feature", "clear_tracker_one_feature")
 
         # =====================================================================
         # INTERACTIVE TWO-FACTOR RISK SENSITIVITY
@@ -5198,25 +5302,12 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             st.plotly_chart(fig_hm, use_container_width=True, config={"displayModeBar": False}, key="plot_line_5070")
 
             st.info(
-                f"The red diamond is the live scenario. Moving either control recalculates the XGBoost prediction while "
+                f"The red diamond is the scenario exploration. Moving either control recalculates the XGBoost prediction while "
                 f"holding the other model inputs at the cohort-median reference values. Current scenario risk: **{scenario_hm_risk*100:.0f}%** "
                 f"({(scenario_hm_risk-reference_risk)*100:+.0f} percentage points versus cohort-median reference)."
             )
 
-        # Shared change log for both cohort-reference sensitivity sections.
-        st.markdown("##### Sensitivity Change Tracker")
-        cohort_history = [r for r in st.session_state.sensitivity_change_history if r.get("Reference") == "Cohort median"]
-        tracker_col1, tracker_col2 = st.columns([5, 1])
-        with tracker_col1:
-            st.caption("Tracks slider changes during this session so you can review how tested values changed predicted risk.")
-        with tracker_col2:
-            if st.button("Clear tracker", key="clear_sensitivity_tracker_cohort", use_container_width=True):
-                st.session_state.sensitivity_change_history = [r for r in st.session_state.sensitivity_change_history if r.get("Reference") != "Cohort median"]
-                st.rerun()
-        if cohort_history:
-            st.dataframe(pd.DataFrame(cohort_history).iloc[::-1], use_container_width=True, hide_index=True)
-        else:
-            st.caption("No changes tracked yet. Move a sensitivity slider to create the first entry.")
+        _render_section_sensitivity_tracker("Two-Factor", "clear_tracker_two_factor")
 
         st.warning(
             "These controls are model sensitivity / what-if analyses, not causal estimates or treatment recommendations. "
