@@ -4195,7 +4195,7 @@ with tab_xai:
     st.markdown(
     """
     <h1 style='font-size: 2rem; font-weight: 700; margin-bottom: 10px;'>
-        Clinical Decision Explainability (XAI)
+        Patient-Specific Clinical Explainability (XAI)
     </h1>
     """, 
     unsafe_allow_html=True
@@ -4280,7 +4280,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
 
     if subtab_choice == "Feature Attributions & Global Importance":
         st.markdown("#### **Clinical Decision Explainability (XAI)**")
-        st.caption("SHAP to identify the primary clinical features influencing the model’s prediction, while LIME provides an alternative explanation to assess the consistency of these feature-level interpretations.")
+        st.caption("SHAP is used to identify and quantify the primary clinical features influencing the model’s prediction, providing interpretable insights into patient-specific clinical decision-making.")
 
         patient_id_display = (
             patient_records["patient_id"].iloc[-1]
@@ -4328,10 +4328,21 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             margin=dict(l=15,r=20,t=15,b=30))
         st.plotly_chart(fig_shap_interactive, use_container_width=True, key="plot_line_4215")
         if not visible.empty:
+            most_positive = shap_table.loc[shap_table["SHAP value"].idxmax()]
+            most_negative = shap_table.loc[shap_table["SHAP value"].idxmin()]
             strongest = shap_table.loc[shap_table["Absolute impact"].idxmax()]
-            st.markdown(f"**Largest individual contribution:** {strongest['Feature']} "
-                        f"({strongest['SHAP value']:+.3f} model-output units). "
-                        "This describes the model's behaviour, not a causal clinical effect.")
+            st.markdown(
+               f"**Largest positive contribution:** {most_positive['Feature']} "
+               f"({most_positive['SHAP value']:+.3f} model-output units).  \n"
+               f"**Largest negative contribution:** {most_negative['Feature']} "
+               f"({most_negative['SHAP value']:+.3f} model-output units)."
+             )
+             st.caption(
+            "SHAP values describe how individual clinical features influence "
+            "the model's prediction relative to its baseline, "
+            "rather than indicating causal clinical effects."
+             )
+
         st.markdown("#### Patient feature impact table")
         st.caption("Red = positive impact on model progression score; blue = negative impact. "
                    "Impact reflects model behaviour, not clinical causation or percentage-point risk change.")
