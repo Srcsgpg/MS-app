@@ -4308,7 +4308,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
             display_n = st.slider("Number of factors to show", 3, len(shap_table), len(shap_table),
                                   key="interactive_shap_count")
         else:
-            # Show every matching factor when a single impact direction is selected.
+            # Display every factor matching the chosen direction, without a slider.
             display_n = len(shap_table)
         visible = shap_table.sort_values("Absolute impact", ascending=False)
         if direction_filter == "Positive impact":
@@ -4376,23 +4376,17 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
         if table_display.empty:
             st.info("No factors match the selected impact direction.")
         else:
-            st.table(table_display.style.hide(axis="index").apply(_color_impact_display, axis=1).format({
+            st.table(table_display.style.apply(_color_impact_display, axis=1).format({
                 "Observed value": "{:.2f}",
                 "Impact (log-odds)": "{:+.3f}",
                 "Impact magnitude": "{:.3f}"
-            }))
-        if direction_filter == "All":
-            st.caption(
-                f"Table reflects the 'All' selection and the {display_n}-factor display limit. "
-                "Positive/negative refers to model progression score, not whether a clinical "
-                "measurement is inherently good or bad."
-            )
-        else:
-            st.caption(
-                f"Table shows all {len(visible)} factors with {direction_filter.lower()}. "
-                "Positive/negative refers to model progression score, not whether a clinical "
-                "measurement is inherently good or bad."
-            )
+            }).hide(axis="index"))
+        st.caption(
+            (f"Table reflects the 'All' selection and the {display_n}-factor display limit. "
+             if direction_filter == "All" else
+             f"Table reflects the '{direction_filter}' selection; all matching factors are shown. ")
+            + "Positive/negative refers to model progression score, not whether a clinical measurement is inherently good or bad."
+        )
 
 
     elif subtab_choice == "Rule-Based Logic":
