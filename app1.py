@@ -4890,7 +4890,7 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) p {
 # =====================================================================
 # AI DECISION EXPLANATION — COHORT & MODEL ANALYSIS SUBTAB
 # =====================================================================
-    elif subtab_choice == "Clinical Model Interpretation":
+    elif subtab_choice == "Global Importance":
         st.markdown(
     """
     <div style="
