@@ -4602,38 +4602,7 @@ if st.session_state["xai_active_page"] == "Patient Decision Pathway":
     <div style="background:#ffffff;border:1px solid #dbe4ed;border-radius:15px;
                 padding:22px 24px;margin:18px 0 12px;box-shadow:0 3px 12px rgba(15,23,42,.05);">
       <div style="font-size:1.25rem;font-weight:800;color:#17324d;margin-bottom:15px;">
-        Does the decision agree with SHAP?
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;">
-        <div style="background:#f1f6fc;border:1px solid #cbdced;border-left:5px solid #2563eb;
-                    border-radius:12px;padding:18px;min-height:112px;">
-          <div style="color:#526579;font-size:.82rem;font-weight:750;margin-bottom:9px;">DECISION TREE</div>
-          <div style="color:#17324d;font-size:1.45rem;font-weight:800;line-height:1.25;">{html.escape(_tree_outcome)}</div>
-        </div>
-        <div style="background:#f1f6fc;border:1px solid #cbdced;border-left:5px solid #0e7490;
-                    border-radius:12px;padding:18px;min-height:112px;">
-          <div style="color:#526579;font-size:.82rem;font-weight:750;margin-bottom:9px;">XGBOOST MODEL</div>
-          <div style="color:#17324d;font-size:1.45rem;font-weight:800;line-height:1.25;">{html.escape(_xgb_outcome)}</div>
-        </div>
-        <div style="background:{_comparison_bg};border:1px solid {_comparison_border};
-                    border-left:5px solid {_comparison_color};border-radius:12px;padding:18px;min-height:112px;">
-          <div style="color:#526579;font-size:.82rem;font-weight:750;margin-bottom:9px;">COMPARISON RESULT</div>
-          <div style="color:{_comparison_color};font-size:1.25rem;font-weight:800;line-height:1.3;">
-            {'✓' if _same_outcome else '⚠'} {html.escape(_comparison_label)}</div>
-        </div>
-      </div>
-      <div style="background:#eff6ff;border:1px solid #c7ddf5;border-radius:11px;
-                  padding:16px 18px;margin-top:14px;">
-        <div style="font-size:.82rem;font-weight:750;color:#526579;margin-bottom:5px;">
-          SHARED INFLUENTIAL FEATURES</div>
-        <div style="font-size:1.08rem;font-weight:750;color:#17324d;">{_shared_text}</div>
-      </div>
-      <div style="font-size:.82rem;color:#64748b;line-height:1.5;margin-top:13px;">
-        SHAP describes the original patient prediction; the tree follows the current slider values.
-        Agreement does not mean the explanations are equivalent.
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+        
 
     st.markdown("---")
     RuleXAIEngine.render_surrogate_validation_section(predictor, df)
