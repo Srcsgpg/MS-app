@@ -4578,16 +4578,6 @@ if st.session_state["xai_active_page"] == "Patient Decision Pathway":
     _rule_tree_slot.plotly_chart(fig_surrogate_tree, width="stretch", key="patient_rule_tree_live")
 
     # Small SHAP comparison; the surrogate tree and sliders above are unchanged.
-    _path_features = []
-    for _node_condition in path_conditions:
-        _display_feature = _node_condition.split(" of ", 1)[0]
-        _raw_feature = DISPLAY_TO_RAW_FEATURE.get(_display_feature)
-        if _raw_feature in predictor.features and _raw_feature not in _path_features:
-            _path_features.append(_raw_feature)
-    _shap_top_three = [predictor.features[i] for i in _interrogation_ranking[:3]
-                       if np.isfinite(_interrogation_shap[i])]
-    _common_features = [f for f in _path_features if f in _shap_top_three]
-    _shared_names = ", ".join(FEATURE_DISPLAY_NAMES[f] for f in _common_features)
     _tree_outcome = "Progression" if active_pred_class == 1 else "No progression"
     _xgb_outcome = "Progression" if pred_class_val == 1 else "No progression"
     _same_outcome = active_pred_class == pred_class_val
@@ -4596,13 +4586,36 @@ if st.session_state["xai_active_page"] == "Patient Decision Pathway":
     _comparison_bg = "#f0fdf4" if _same_outcome else "#fffbeb"
     _comparison_border = "#bbf7d0" if _same_outcome else "#fcd34d"
     _comparison_label = "Same classification" if _same_outcome else "Different classifications"
-    _shared_text = (html.escape(_shared_names) if _common_features
-                    else "No shared features in the top three SHAP factors")
     st.markdown(f"""
     <div style="background:#ffffff;border:1px solid #dbe4ed;border-radius:15px;
                 padding:22px 24px;margin:18px 0 12px;box-shadow:0 3px 12px rgba(15,23,42,.05);">
       <div style="font-size:1.25rem;font-weight:800;color:#17324d;margin-bottom:15px;">
-        
+        Does the decision agree with SHAP?
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;">
+        <div style="background:#f1f6fc;border:1px solid #cbdced;border-left:5px solid #2563eb;
+                    border-radius:12px;padding:18px;min-height:112px;">
+          <div style="color:#526579;font-size:.82rem;font-weight:750;margin-bottom:9px;">DECISION TREE</div>
+          <div style="color:#17324d;font-size:1.45rem;font-weight:800;line-height:1.25;">{html.escape(_tree_outcome)}</div>
+        </div>
+        <div style="background:#f1f6fc;border:1px solid #cbdced;border-left:5px solid #0e7490;
+                    border-radius:12px;padding:18px;min-height:112px;">
+          <div style="color:#526579;font-size:.82rem;font-weight:750;margin-bottom:9px;">XGBOOST MODEL</div>
+          <div style="color:#17324d;font-size:1.45rem;font-weight:800;line-height:1.25;">{html.escape(_xgb_outcome)}</div>
+        </div>
+        <div style="background:{_comparison_bg};border:1px solid {_comparison_border};
+                    border-left:5px solid {_comparison_color};border-radius:12px;padding:18px;min-height:112px;">
+          <div style="color:#526579;font-size:.82rem;font-weight:750;margin-bottom:9px;">COMPARISON RESULT</div>
+          <div style="color:{_comparison_color};font-size:1.25rem;font-weight:800;line-height:1.3;">
+            {'✓' if _same_outcome else '⚠'} {html.escape(_comparison_label)}</div>
+        </div>
+      </div>
+      <div style="font-size:.82rem;color:#64748b;line-height:1.5;margin-top:13px;">
+        SHAP describes the original patient prediction; the tree follows the current slider values.
+        Agreement does not mean the explanations are equivalent.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     st.markdown("---")
     RuleXAIEngine.render_surrogate_validation_section(predictor, df)
